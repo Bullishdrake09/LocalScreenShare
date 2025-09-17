@@ -498,6 +498,11 @@ class RemoteClientApp:
                             except:
                                 break
                         self.mouse_queue.put_nowait(data)
+                        
+                elif protocol == b'PONG':
+                    # Handle pong response for latency calculation
+                    if self.last_ping_time > 0:
+                        self.latency = (time.time() - self.last_ping_time) * 1000
 
             except Exception as e:
                 print(f"Data receive error: {e}")
