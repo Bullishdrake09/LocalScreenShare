@@ -1,7 +1,5 @@
-# remote_host_server.py - FINAL CRASH-PROOF SERVER
-# Fixes:
-# 1. Socket closed while screen thread still runs → [WinError 10038]
-# 2. Partial/merged TCP packets → "invalid literal for int()"
+# remote_host_server.py — ULTRA LOW-LATENCY VERSION
+# Uses WinAPI SetCursorPos for instant mouse movement
 
 import socket
 import threading
@@ -10,32 +8,40 @@ import pickle
 import cv2
 import numpy as np
 from mss import mss
-import pyautogui
 import time
 
-# Disable failsafe (optional, be careful!)
-pyautogui.FAILSAFE = False
+# 👇 WINAPI for instant mouse movement (Windows only)
+import ctypes
+from ctypes import wintypes
+user32 = ctypes.WinDLL('user32', use_last_error=True)
+SetCursorPos = user32.SetCursorPos
+SetCursorPos.argtypes = [wintypes.INT, wintypes.INT]
+SetCursorPos.restype = wintypes.BOOL
+
+# Optional: Show cursor if hidden
+ShowCursor = user32.ShowCursor
+ShowCursor.argtypes = [wintypes.BOOL]
 
 HOST = '0.0.0.0'
 PORT = 65432
 
-# Thread-safe flag to signal screen thread to stop
 class Connection:
     def __init__(self, sock, addr):
         self.sock = sock
         self.addr = addr
-        self.active = True  # shared flag
+        self.active = True
 
 def safe_move(x, y):
     try:
-        current_x, current_y = pyautogui.position()
-        if abs(current_x - x) > 2 or abs(current_y - y) > 2:
-            pyautogui.moveTo(x, y)
+        # ⚡ INSTANT cursor move via WinAPI
+        SetCursorPos(int(x), int(y))
     except Exception as e:
         print(f"[Server] Mouse move error: {e}")
 
 def safe_click(button, pressed):
     try:
+        # Still use pyautogui for clicks (or replace with WinAPI mouse_event if needed)
+        import pyautogui
         if pressed:
             pyautogui.mouseDown(button=button)
         else:
@@ -45,12 +51,14 @@ def safe_click(button, pressed):
 
 def safe_scroll(dx, dy):
     try:
+        import pyautogui
         pyautogui.scroll(dy)
     except Exception as e:
         print(f"[Server] Scroll error: {e}")
 
 def safe_key(key, action):
     try:
+        import pyautogui
         if action == 'press':
             pyautogui.keyDown(key)
         elif action == 'release':
@@ -59,18 +67,17 @@ def safe_key(key, action):
         print(f"[Server] Key {action} error for '{key}': {e}")
 
 def capture_screen(conn):
-    """Continuously capture and send screen — respects conn.active flag"""
     with mss() as sct:
-        monitor = sct.monitors[1]  # primary monitor
+        monitor = sct.monitors[1]
         while conn.active:
             try:
                 img = sct.grab(monitor)
                 img_np = np.array(img)
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_BGRA2BGR)
-                _, buffer = cv2.imencode('.jpg', img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                # 🔥 Lower quality = faster encode + less bandwidth
+                _, buffer = cv2.imencode('.jpg', img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 50])
                 data = pickle.dumps(buffer, 0)
                 size = len(data)
-                # Check flag before sending
                 if not conn.active:
                     break
                 conn.sock.sendall(struct.pack(">L", size) + data)
@@ -80,18 +87,14 @@ def capture_screen(conn):
     print("[Server Screen] Thread exited cleanly")
 
 def handle_input(conn):
-    """Receive and execute mouse/keyboard commands — handles TCP stream correctly"""
     buffer = ""
     while conn.active:
         try:
             data = conn.sock.recv(1024).decode('utf-8')
-            if not data:
-                print("[Server Input] Client disconnected (empty data)")
+            if not 
                 break
 
             buffer += data
-
-            # Process all complete messages in buffer
             while '\n' in buffer:
                 line, buffer = buffer.split('\n', 1)
                 line = line.strip()
@@ -106,7 +109,7 @@ def handle_input(conn):
                         x, y = int(parts[1]), int(parts[2])
                         safe_move(x, y)
                     except ValueError as e:
-                        print(f"[Server Input] Invalid MOVE coords: {line} | {e}")
+                        print(f"[Server Input] Invalid MOVE: {line}")
 
                 elif cmd == 'CLICK' and len(parts) >= 3:
                     button = parts[1]
@@ -118,21 +121,17 @@ def handle_input(conn):
                         dx, dy = int(parts[1]), int(parts[2])
                         safe_scroll(dx, dy)
                     except ValueError as e:
-                        print(f"[Server Input] Invalid SCROLL values: {line} | {e}")
+                        print(f"[Server Input] Invalid SCROLL: {line}")
 
                 elif cmd == 'KEY' and len(parts) >= 3:
                     key = parts[1]
                     action = parts[2]
                     safe_key(key, action)
 
-                else:
-                    print(f"[Server Input] Unknown or malformed command: {line}")
-
         except Exception as e:
             print(f"[Server Input] Error: {e}")
             break
 
-    # Signal screen thread to stop
     conn.active = False
     print("[Server Input] Thread exited cleanly")
 
@@ -149,20 +148,19 @@ def start_server():
                 print(f"🔗 Connected by {addr}")
                 conn = Connection(client_sock, addr)
 
-                # Start screen streaming thread
                 screen_thread = threading.Thread(target=capture_screen, args=(conn,), daemon=True)
                 screen_thread.start()
 
-                # Handle input on main thread
                 handle_input(conn)
 
-                # Cleanup
                 conn.active = False
                 client_sock.close()
                 print(f"🔚 Connection with {addr} closed")
 
             except Exception as e:
-                print(f"[Server Main] Accept error: {e}")
+                print(f"[Server Main] Error: {e}")
 
 if __name__ == "__main__":
+    # Show cursor in case it's hidden
+    ShowCursor(True)
     start_server()
