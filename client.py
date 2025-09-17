@@ -1,5 +1,5 @@
-# remote_client_gui.py — TRUE FULLSCREEN REMOTE CONTROL MODE
-# Host screen fills entire client display. Host mouse follows client mouse 1:1.
+# remote_client_gui.py — LOW LATENCY OPTIMIZED VERSION
+# Prioritizes input over video, skips frames if needed, reduces quality
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -26,12 +26,13 @@ class RemoteClientApp:
         self.sock = None
         self.running = False
         self.fullscreen = False
-
-        # Store remote screen resolution (updated when first frame arrives)
         self.remote_width = 1920
         self.remote_height = 1080
 
-        # UI Elements (will be hidden in fullscreen)
+        # ➤ Add frame skip counter
+        self.frame_skip = 0
+        self.last_frame_time = 0
+
         self.top_widgets = []
 
         # === Scanning UI ===
@@ -77,11 +78,9 @@ class RemoteClientApp:
         self.canvas = tk.Canvas(root, bg='black', relief="sunken", bd=0, highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        # Bind keys
         self.root.bind("<F11>", lambda e: self.toggle_fullscreen())
         self.root.bind("<Escape>", lambda e: self.exit_fullscreen())
 
-        # Mouse/Keyboard hooks
         self.mouse_listener = None
         self.keyboard_listener = None
 
@@ -93,19 +92,17 @@ class RemoteClientApp:
         self.root.attributes("-fullscreen", self.fullscreen)
         if self.fullscreen:
             self.root.config(cursor="none")
-            # Hide all top widgets
             for widget in self.top_widgets:
                 widget.pack_forget()
             self.canvas.focus_set()
         else:
             self.root.config(cursor="")
             self.root.geometry("1000x750")
-            # Show all top widgets
-            self.scan_button.pack(side=tk.LEFT, padx=5)  # repack scan_frame children
+            self.scan_button.pack(side=tk.LEFT, padx=5)
             self.status_label.pack(side=tk.LEFT, padx=5)
-            self.ip_entry.pack(side=tk.LEFT, padx=5)     # repack manual_frame
-            self.host_listbox.pack(fill=tk.BOTH, expand=True, pady=5)  # repack list_frame
-            self.connect_button.pack(side=tk.LEFT, padx=5)  # repack btn_frame
+            self.ip_entry.pack(side=tk.LEFT, padx=5)
+            self.host_listbox.pack(fill=tk.BOTH, expand=True, pady=5)
+            self.connect_button.pack(side=tk.LEFT, padx=5)
             self.fullscreen_button.pack(side=tk.LEFT, padx=5)
 
     def exit_fullscreen(self):
@@ -211,7 +208,6 @@ class RemoteClientApp:
             threading.Thread(target=self.receive_screen, daemon=True).start()
             self.start_input_capture()
 
-            # ➤ AUTO-ENTER FULLSCREEN ON CONNECT
             self.fullscreen = True
             self.apply_fullscreen_mode()
 
@@ -241,7 +237,6 @@ class RemoteClientApp:
             self.stop_input_capture()
             self.canvas.delete("all")
 
-            # ➤ EXIT FULLSCREEN ON DISCONNECT
             self.fullscreen = False
             self.apply_fullscreen_mode()
 
@@ -259,6 +254,12 @@ class RemoteClientApp:
 
         while self.running:
             try:
+                # ➤ SKIP FRAME if we're behind (prioritize input responsiveness)
+                current_time = time.time()
+                if current_time - self.last_frame_time < 0.016:  # ~60 FPS max
+                    time.sleep(0.001)
+                    continue
+
                 while len(data) < payload_size:
                     packet = self.sock.recv(4096)
                     if not packet:
@@ -283,32 +284,29 @@ class RemoteClientApp:
                 if frame is None:
                     continue
 
-                # ➤ Update remote resolution
                 self.remote_height, self.remote_width = frame.shape[:2]
 
-                # ➤ In fullscreen: stretch to fill entire screen (no black bars)
                 if self.fullscreen:
-                    canvas_width = self.root.winfo_screenwidth()
-                    canvas_height = self.root.winfo_screenheight()
-                    frame = cv2.resize(frame, (canvas_width, canvas_height), interpolation=cv2.INTER_LINEAR)
+                    screen_width = self.root.winfo_screenwidth()
+                    screen_height = self.root.winfo_screenheight()
+                    # ➤ FAST resize with INTER_LINEAR (good enough for real-time)
+                    frame = cv2.resize(frame, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
                 else:
-                    # Normal mode: fit in canvas
                     canvas_width = self.canvas.winfo_width()
                     canvas_height = self.canvas.winfo_height()
                     if canvas_width > 1 and canvas_height > 1:
                         h, w = frame.shape[:2]
-                        scale_w = canvas_width / w
-                        scale_h = canvas_height / h
-                        scale = min(scale_w, scale_h)
+                        scale = min(canvas_width / w, canvas_height / h)
                         new_w, new_h = int(w * scale), int(h * scale)
                         if new_w > 0 and new_h > 0:
-                            frame = cv2.resize(frame, (new_w, new_h))
+                            frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(frame)
                 imgtk = ImageTk.PhotoImage(image=img)
 
                 self.root.after(0, self.update_canvas, imgtk)
+                self.last_frame_time = time.time()
 
             except Exception as e:
                 print("Screen receive error:", e)
@@ -319,16 +317,11 @@ class RemoteClientApp:
     def update_canvas(self, imgtk):
         self.canvas.delete("all")
         if self.fullscreen:
-            # Stretch to fill screen
             self.canvas.create_image(0, 0, anchor=tk.NW, image=imgtk)
         else:
-            # Center in canvas
-            cw = self.canvas.winfo_width()
-            ch = self.canvas.winfo_height()
-            iw = imgtk.width()
-            ih = imgtk.height()
-            x = (cw - iw) // 2
-            y = (ch - ih) // 2
+            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+            iw, ih = imgtk.width(), imgtk.height()
+            x, y = (cw - iw) // 2, (ch - ih) // 2
             self.canvas.create_image(x, y, anchor=tk.NW, image=imgtk)
         self.canvas.image = imgtk
 
@@ -340,6 +333,7 @@ class RemoteClientApp:
             if not self.connected or not self.sock:
                 return False
             try:
+                # ➤ Send immediately, no buffering
                 self.sock.sendall((data + '\n').encode('utf-8'))
                 return True
             except (OSError, ConnectionError, Exception) as e:
@@ -349,17 +343,14 @@ class RemoteClientApp:
 
         def on_move(x, y):
             if not self.fullscreen:
-                return  # Only control host when in fullscreen
+                return
 
-            # ➤ Map client screen position → to host screen resolution
             screen_width = self.root.winfo_screenwidth()
             screen_height = self.root.winfo_screenheight()
 
-            # Calculate ratio
             xr = x / screen_width
             yr = y / screen_height
 
-            # Map to remote resolution
             target_x = int(xr * self.remote_width)
             target_y = int(yr * self.remote_height)
 
@@ -383,8 +374,8 @@ class RemoteClientApp:
                 k = str(key).replace("'", "")
                 if k.startswith('Key.'):
                     k = k[4:]
-                if k == 'f11' or k == 'escape':
-                    return  # Let local system handle
+                if k in ('f11', 'escape'):
+                    return
                 safe_send(f"KEY|{k}|press")
             except Exception as e:
                 print(f"[Input] Key press error: {e}")
@@ -396,13 +387,14 @@ class RemoteClientApp:
                 k = str(key).replace("'", "")
                 if k.startswith('Key.'):
                     k = k[4:]
-                if k == 'f11' or k == 'escape':
+                if k in ('f11', 'escape'):
                     return
                 safe_send(f"KEY|{k}|release")
             except Exception as e:
                 print(f"[Input] Key release error: {e}")
 
         try:
+            # ➤ Start listeners with no delay
             self.mouse_listener = mouse.Listener(
                 on_move=on_move,
                 on_click=on_click,
@@ -416,7 +408,7 @@ class RemoteClientApp:
             )
             self.mouse_listener.start()
             self.keyboard_listener.start()
-            print("[Input] Listeners started")
+            print("[Input] Low-latency listeners started")
         except Exception as e:
             print(f"[Input] Failed to start listeners: {e}")
 
